@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime
 import json
 import re
+import os
 
 # Initialize session state (these are critical for the app to remember user's documents)
 if 'documents' not in st.session_state:
@@ -363,6 +364,64 @@ def remove_paragraph(parent_section_id: str, paragraph_id_to_remove: str):
     else:
         st.error(f"Error: Target section with ID '{parent_section_id}' not found or has no paragraphs.")
 
+# --- Utility functions ---
+def parse_markdown_to_structure(md_content):
+    """Parse markdown content into document structure with sections/subsections/paragraphs."""
+    lines = md_content.split("\n")
+    doc_structure = []
+    stack = []  # keep track of section hierarchy
+
+    paragraph_buffer = []
+
+    def flush_paragraphs(current_section):
+        nonlocal paragraph_buffer
+        if paragraph_buffer:
+            for idx, para in enumerate(paragraph_buffer, start=1):
+                current_section.setdefault("paragraphs", []).append({
+                    "id": generate_unique_id("para"),
+                    "order": len(current_section.get("paragraphs", [])) + 1,
+                    "content": para.strip()
+                })
+            paragraph_buffer = []
+
+    for line in lines:
+        header_match = re.match(r"^(#+) (.*)", line)
+        if header_match:
+            level = len(header_match.group(1))
+            title = header_match.group(2).strip()
+
+            # Create new section
+            new_section = {
+                "id": generate_unique_id("section"),
+                "title": title,
+                "level": level,
+                "paragraphs": [],
+                "subsections": []
+            }
+
+            # Place this section at the right hierarchy level
+            while stack and stack[-1]["level"] >= level:
+                stack.pop()
+            if stack:
+                parent = stack[-1]
+                flush_paragraphs(parent)
+                parent["subsections"].append(new_section)
+            else:
+                doc_structure.append(new_section)
+
+            stack.append(new_section)
+        else:
+            if line.strip():
+                paragraph_buffer.append(line)
+            else:
+                if stack:
+                    flush_paragraphs(stack[-1])
+
+    # flush leftover paragraphs
+    if stack:
+        flush_paragraphs(stack[-1])
+
+    return doc_structure
 
 # Placeholder for your markdown generation logic
 def generate_markdown_document(doc):
@@ -394,22 +453,19 @@ def generate_markdown_document(doc):
         
     return "\n".join(markdown_output)
 
-
-def show_help():
-    st.sidebar.markdown("""
-        ### Help
-        - **Document Editor**: Add and manage sections, subsections, and paragraphs.
-        - **Live Preview**: See your document rendered in Markdown.
-        - **Export Options**: Download as Markdown or copy the formatted text.
-    """)
-
 # --- Main Streamlit App Page 1 ---
 def app_page_1():
-    # Ensure session_state has necessary initializations
+    # Initialize session state
     if 'current_doc_id' not in st.session_state:
         st.session_state.current_doc_id = generate_unique_id("doc")
     if 'documents' not in st.session_state:
         st.session_state.documents = {}
+    if 'last_uploaded' not in st.session_state:
+        st.session_state.last_uploaded = None
+    if 'last_saved_path' not in st.session_state:
+        st.session_state.last_saved_path = None
+
+    # Ensure current document exists
     if st.session_state.current_doc_id not in st.session_state.documents:
         st.session_state.documents[st.session_state.current_doc_id] = {
             'id': st.session_state.current_doc_id,
@@ -419,79 +475,140 @@ def app_page_1():
         }
 
     current_doc = st.session_state.documents[st.session_state.current_doc_id]
-    
+
+    # Sidebar content
+    with st.sidebar:
+        st.header("📊 Document Statistics")
+
+        markdown_content_for_stats = generate_markdown_document(current_doc)
+        word_count = len(markdown_content_for_stats.split())
+        char_count = len(markdown_content_for_stats)
+
+        def count_subsections_recursive(sections_list):
+            return sum(len(s.get('subsections', [])) + count_subsections_recursive(s.get('subsections', [])) for s in sections_list)
+
+        def count_paragraphs_recursive(sections_list):
+            return sum(len(s.get('paragraphs', [])) + count_paragraphs_recursive(s.get('subsections', [])) for s in sections_list)
+
+        st.metric("Word Count", f"{word_count:,}")
+        st.metric("Character Count", f"{char_count:,}")
+        st.metric("Top Sections", len(current_doc.get('sections', [])))
+        st.metric("All Subsections", count_subsections_recursive(current_doc.get('sections', [])))
+        st.metric("All Paragraphs", count_paragraphs_recursive(current_doc.get('sections', [])))
+
+        st.markdown("---")
+        if st.button("➕ New Document"):
+            new_doc_id = generate_unique_id("doc")
+            st.session_state.current_doc_id = new_doc_id
+            st.session_state.documents[new_doc_id] = {
+                'id': new_doc_id,
+                'title': 'New Document',
+                'intro': '',
+                'sections': []
+            }
+            st.session_state.last_uploaded = None
+            st.session_state.last_saved_path = None
+            st.rerun()
+
+        st.markdown("---")
+        st.subheader("📂 Available Files (data/)")
+        os.makedirs("data", exist_ok=True)
+        files = sorted(os.listdir("data"))
+        if files:
+            for f in files:
+                st.text(f)
+        else:
+            st.info("No files uploaded yet.")
+
     st.header(f"✏️ Editing: {current_doc.get('title', 'Untitled Document')}")
-    
+
     # Two column layout for editor and preview
     col1, col2 = st.columns([1, 1])
-    
+
     with col1:
         st.subheader("📝 Document Editor")
-        
-        # Document title and intro
-        with st.container():
-            st.markdown("### 📄 Document Header")
-            
-            title = st.text_input(
-                "Document Title",
-                value=current_doc.get('title', ''),
-                placeholder="Enter document title...",
-                key=f"doc_title_{st.session_state.current_doc_id}" # Unique key for current doc
-            )
-            
-            intro = st.text_area(
-                "Introduction",
-                value=current_doc.get('intro', ''),
-                placeholder="Write an introduction that explains the purpose and scope of this document...",
-                height=100,
-                key=f"doc_intro_{st.session_state.current_doc_id}" # Unique key
-            )
-            
-            # Update document state (important for persistence)
-            current_doc['title'] = title
-            current_doc['intro'] = intro
-        
-        # Sections management
+
+        # --- Import Markdown file ---
+        st.markdown("### 📂 Import Markdown File")
+        uploaded_file = st.file_uploader("Upload a Markdown file", type=["md"])  # implicit upload on selection
+
+        if uploaded_file is not None:
+            # Only process/save if this is a new file selection
+            if st.session_state.last_uploaded != uploaded_file.name:
+                os.makedirs("data", exist_ok=True)
+                file_path = os.path.join("data", uploaded_file.name)
+
+                # Save the uploaded file ONCE on new selection
+                with open(file_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                st.session_state.last_saved_path = file_path
+                st.success(f"✅ File saved to {file_path}")
+
+                # Parse and create a fresh document for this upload
+                file_content = uploaded_file.getvalue().decode("utf-8")
+                new_doc_id = generate_unique_id("doc")
+                st.session_state.current_doc_id = new_doc_id
+                st.session_state.documents[new_doc_id] = {
+                    'id': new_doc_id,
+                    'title': uploaded_file.name.replace(".md", ""),
+                    'intro': '',
+                    'sections': parse_markdown_to_structure(file_content)
+                }
+                st.session_state.last_uploaded = uploaded_file.name
+                st.rerun()
+            else:
+                st.info(f"Currently loaded: {st.session_state.last_uploaded}")
+
+        # --- Document Header ---
+        st.markdown("### 📄 Document Header")
+        title = st.text_input(
+            "Document Title",
+            value=current_doc.get('title', ''),
+            placeholder="Enter document title...",
+            key=f"doc_title_{st.session_state.current_doc_id}"
+        )
+        intro = st.text_area(
+            "Introduction",
+            value=current_doc.get('intro', ''),
+            placeholder="Write an introduction that explains the purpose and scope of this document...",
+            height=100,
+            key=f"doc_intro_{st.session_state.current_doc_id}"
+        )
+        current_doc['title'] = title
+        current_doc['intro'] = intro
+
+        # --- Sections ---
         st.markdown("### 📚 Sections")
-        
         if st.button("➕ Add New Top-Level Section"):
-            add_section() # This now operates on current_doc['sections']
-        
-        # --- RECURSIVE RENDERING OF SECTIONS AND PARAGRAPHS ---
+            add_section()
+
         def render_section_editor_recursive(sections_list, parent_key_prefix=""):
             for i, section in enumerate(sections_list):
                 section_key_prefix = f"{parent_key_prefix}_section_{section['id']}_{i}"
                 with st.expander(
                     f"{'📋' if section.get('level', 1) == 1 else '📂'} Section {i+1}: {section.get('title', 'Untitled Section')}",
-                    # REMOVE THIS LINE: key=f"exp_{section_key_prefix}"
                     expanded=True
                 ):
-                    
                     col_title, col_level = st.columns([3, 1])
                     with col_title:
-                        section_title = st.text_input(
+                        section['title'] = st.text_input(
                             "Section Title",
                             value=section.get('title', ''),
                             placeholder="Enter section title...",
                             key=f"title_{section_key_prefix}"
                         )
-                        section['title'] = section_title
-                    
                     with col_level:
-                        section_level = st.selectbox(
+                        section['level'] = st.selectbox(
                             "Heading Level",
                             options=[1, 2, 3, 4],
                             index=min(section.get('level', 1) - 1, 3),
                             key=f"level_{section_key_prefix}"
                         )
-                        section['level'] = section_level
-                    
+
                     st.markdown("---")
                     st.markdown(f"**Paragraphs in '{section.get('title', 'Untitled')}'**")
-                    
-                    # --- Paragraphs for THIS section/subsection ---
                     if 'paragraphs' not in section:
-                        section['paragraphs'] = [] # Ensure it exists
+                        section['paragraphs'] = []
 
                     for p_idx, paragraph in enumerate(section['paragraphs']):
                         col_para_content, col_para_remove = st.columns([6, 1])
@@ -504,148 +621,84 @@ def app_page_1():
                                 key=f"para_content_{section_key_prefix}_{paragraph['id']}_{p_idx}"
                             )
                         with col_para_remove:
-                            st.write("") # Spacer
-                            st.write("") # Spacer
                             if st.button("🗑️", key=f"remove_para_{section_key_prefix}_{paragraph['id']}_{p_idx}", help="Remove this paragraph"):
                                 remove_paragraph(section['id'], paragraph['id'])
-                    
+
                     if st.button(f"➕ Add Paragraph to '{section.get('title', 'Untitled')}'", key=f"add_para_{section_key_prefix}"):
-                        add_paragraph(section['id']) # Use the section's actual ID
-                    
+                        add_paragraph(section['id'])
+
                     st.markdown("---")
                     st.markdown(f"**Subsections of '{section.get('title', 'Untitled')}'**")
-                    
-                    # Add Subsection button
                     if st.button(f"➕ Add Subsection to '{section.get('title', 'Untitled')}'", key=f"add_sub_{section_key_prefix}"):
-                        # Find the index of this section in its parent list to pass to add_subsection
-                        # This part needs adjustment as add_subsection expects an index, but we're in a recursive call
-                        # A better approach would be to pass the parent_section_obj or its id.
-                        
-                        # Simplest for now: ensure 'subsections' list is updated directly
-                        parent_level = section.get('level', 1)
-                        subsection_id = generate_unique_id(f"section_{section['id'].split('_')[1]}.{len(section['subsections']) + 1}")
+                        subsection_id = generate_unique_id(f"section_{section['id']}")
                         new_subsection = {
                             'id': subsection_id,
-                            'title': f'New Subsection {len(section['subsections']) + 1}',
-                            'level': parent_level + 1,
+                            'title': f'New Subsection {len(section.get('subsections', [])) + 1}',
+                            'level': section.get('level', 1) + 1,
                             'paragraphs': [],
                             'subsections': []
                         }
-                        section['subsections'].append(new_subsection)
-                        st.rerun() # Rerun to display the new subsection immediately
-                    
-                    # Recursively render subsections
-                    if section.get('subsections'):
-                        render_section_editor_recursive(section['subsections'], parent_key_prefix=section_key_prefix) # Pass current section's key as prefix
+                        section.setdefault('subsections', []).append(new_subsection)
+                        st.rerun()
 
-                    # Remove section button
+                    if section.get('subsections'):
+                        render_section_editor_recursive(section['subsections'], parent_key_prefix=section_key_prefix)
+
                     st.markdown("---")
                     if st.button(f"🗑️ Remove Section '{section.get('title', 'Untitled')}'", key=f"remove_section_{section_key_prefix}"):
-                        # Find index of this section within its parent list to remove it
-                        # This requires knowing the parent list and the index, which is complex in recursive calls.
-                        # For simplicity, we'll assume sections_list is the top-level current_doc['sections']
-                        # A more robust solution involves passing the parent list down or using a flat lookup for removal.
-                        
-                        # For now, let's make a simplified removal for top-level sections for demonstration
-                        # A full solution would adapt find_section_by_id or pass parent references
-                        
-                        # Simplified removal for top-level. You need more robust logic for nested removal.
-                        if parent_key_prefix == "": # It's a top-level section
+                        if parent_key_prefix == "":
                             st.session_state.documents[st.session_state.current_doc_id]['sections'].pop(i)
                         else:
-                            # This is where a more complex recursive removal would go
-                            # For a quick fix, if you delete a nested section, it will likely just delete the top-level one
-                            # or you'd need to re-implement `remove_section` to take section_id and find/remove it
-                            st.warning("Removing nested sections directly from this button is not fully implemented yet.")
-                            # Example of how you would *find* it to remove:
-                            # doc_sections = st.session_state.documents[st.session_state.current_doc_id]['sections']
-                            # # Implement a recursive removal function here
+                            st.warning("Nested section removal not fully implemented.")
                         st.rerun()
-                        
-        # Call the recursive rendering function for the top-level sections
+
         if current_doc.get('sections'):
             render_section_editor_recursive(current_doc['sections'])
         else:
             st.info("👆 Add a new top-level section to start building your document structure.")
-        
+
     with col2:
         st.subheader("👁️ Live Preview")
-        
-        # Generate and show preview
         markdown_content = generate_markdown_document(current_doc)
-        
-        # Show formatted preview
+
         if markdown_content.strip():
             st.markdown("#### 📖 Document Preview:")
             st.markdown(markdown_content)
         else:
             st.info("👆 Start adding content on the left to see your document preview here!")
-        
-        # Export options
+
         st.markdown("---")
         st.subheader("💾 Export Options")
-        
         if markdown_content.strip():
-            # Auto-save happens on every interaction, but an explicit button might be nice.
-            if st.button("💾 Explicitly Save Document", help="This document is auto-saved on every interaction, but you can explicitly save it too."):
+            if st.button("💾 Explicitly Save Document"):
                 save_document()
                 st.success(f"✅ Document '{current_doc.get('title', 'Untitled')}' saved!")
-            
-            # Download as markdown
+
             st.download_button(
                 label="⬇️ Download Markdown",
                 data=markdown_content,
                 file_name=f"{current_doc.get('title', 'document').lower().replace(' ', '_')}_{st.session_state.current_doc_id}.md",
                 mime="text/markdown"
             )
-            
-            # Copy to clipboard (show formatted text)
+
+            # Save an extra copy ONLY when the user asks for it
+            if st.button("📂 Save a copy to data/ for chunking"):
+                os.makedirs("data", exist_ok=True)
+                save_path = os.path.join(
+                    "data",
+                    f"{current_doc.get('title', 'document').lower().replace(' ', '_')}_{st.session_state.current_doc_id}.md"
+                )
+                with open(save_path, "w", encoding="utf-8") as f:
+                    f.write(markdown_content)
+                st.session_state.last_saved_path = save_path
+                st.success(f"📁 Saved to: {save_path}")
+
             with st.expander("📋 Copy Formatted Text to Clipboard"):
                 st.code(markdown_content, language="markdown")
-            
-            # Document statistics
-            st.markdown("---")
-            st.subheader("📊 Document Statistics")
-            
-            word_count = len(markdown_content.split())
-            char_count = len(markdown_content)
-            
-            col_stats1, col_stats2 = st.columns(2)
-            with col_stats1:
-                st.metric("Word Count", f"{word_count:,}")
-                st.metric("Character Count", f"{char_count:,}")
-            
-            with col_stats2:
-                total_sections = len(current_doc.get('sections', []))
-                # Function to count subsections recursively
-                def count_subsections_recursive(sections_list):
-                    count = 0
-                    for s in sections_list:
-                        count += len(s.get('subsections', []))
-                        count += count_subsections_recursive(s.get('subsections', []))
-                    return count
-                
-                total_subsections = count_subsections_recursive(current_doc.get('sections', []))
-                
-                # Function to count paragraphs recursively
-                def count_paragraphs_recursive(sections_list):
-                    count = 0
-                    for s in sections_list:
-                        count += len(s.get('paragraphs', []))
-                        count += count_paragraphs_recursive(s.get('subsections', []))
-                    return count
-                total_paragraphs = count_paragraphs_recursive(current_doc.get('sections', []))
 
-                st.metric("Top Sections", total_sections)
-                st.metric("All Subsections", total_subsections)
-                st.metric("All Paragraphs", total_paragraphs) # <--- NEW STATISTIC
-                
-
-    # Always show help section at the bottom of the page
     st.markdown("---")
     show_help()
 
-# This is the entry point for the Streamlit page
 if __name__ == "__main__":
     st.set_page_config(layout="wide", page_title="Document Editor")
     app_page_1()
