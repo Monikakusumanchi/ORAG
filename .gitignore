@@ -1,1 +1,4 @@
 .env
+./vector_store
+./data
+./processed_docs
