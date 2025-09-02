@@ -1,9 +1,12 @@
 # pages/2_Chunk_Document.py
 import os
+import json
 import streamlit as st
 from chunking import HierarchicalChunker, get_chunking_analysis
 
 DATA_DIR = "data"
+PROCESSED_DIR = "processed_docs"
+os.makedirs(PROCESSED_DIR, exist_ok=True)
 
 def load_documents():
     docs = {}
@@ -16,6 +19,29 @@ def load_documents():
             except Exception:
                 st.warning(f"Could not read {fname}. Skipping...")
     return docs
+
+def chunk_to_dict(chunk):
+    """Convert Chunk object to JSON serializable dict."""
+    return {
+        "id": chunk.id,
+        "content": chunk.content,
+        "level": chunk.level,
+        "parent_id": chunk.parent_id,
+        "children_ids": chunk.children_ids,
+        "metadata": chunk.metadata,
+    }
+
+def save_chunks(doc_id, doc_name, strategy, chunks):
+    """Save chunks and metadata to JSON for later embedding."""
+    out = {
+        "doc_id": doc_id,
+        "doc_name": doc_name,
+        "strategy": strategy,
+        "chunks": [chunk_to_dict(c) for c in chunks],
+    }
+    out_path = os.path.join(PROCESSED_DIR, f"{doc_id}.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, ensure_ascii=False)
 
 def main():
     st.title("📄 Document Chunking & Analysis")
@@ -44,8 +70,9 @@ def main():
     elif strategy == "Fixed-size":
         fixed_size = st.sidebar.slider("Fixed-size chunk length (words)", 50, 500, 200, step=50)
 
+    # ---- Preview single document ----
     if st.sidebar.button("Run Chunking"):
-        st.subheader(f"Chunking: {doc_name}")
+        st.subheader(f"Chunking Preview: {doc_name}")
 
         # Map strategy to chunker mode
         if strategy == "Hierarchical":
@@ -76,12 +103,43 @@ def main():
         for c in analysis["sample_retrievable_chunks"]:
             with st.expander(f"Chunk {c['id']} ({c['level']})"):
                 st.markdown("**Full Content:**")
-                st.write(c["content_preview"])  # now we want full content
+                st.write(c["content_preview"])
                 if "core_content" in c["metadata"]:
                     st.markdown("**Core Content:**")
                     st.write(c["metadata"]["core_content"])
                 st.markdown("**Metadata:**")
                 st.json(c["metadata"])
+
+    # ---- Process all documents and save ----
+    if st.sidebar.button("🚀 Create Chunks for All Documents"):
+        st.subheader("Processing all documents...")
+
+        for fname, content in docs.items():
+            doc_id = os.path.splitext(fname)[0]
+
+            # Map strategy
+            if strategy == "Hierarchical":
+                mode = "hierarchical"
+            elif strategy == "Hierarchical with Overlap":
+                mode = "hierarchical_overlap"
+            else:
+                mode = "fixed_size"
+
+            chunker = HierarchicalChunker(
+                doc_id=doc_id,
+                title=fname,
+                paragraph_overlap_sentences=paragraph_overlap if paragraph_overlap else 0,
+                sentence_overlap_chars=sentence_overlap if sentence_overlap else 0,
+                strategy=mode,
+                fixed_chunk_size=fixed_size if fixed_size else 200
+            )
+
+            chunks = chunker.chunk_document(content)
+
+            # Save to processed_docs
+            save_chunks(doc_id, fname, mode, chunks)
+
+        st.success(f"✅ All documents processed and saved in `{PROCESSED_DIR}`")
 
 if __name__ == "__main__":
     main()

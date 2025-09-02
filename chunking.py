@@ -20,6 +20,16 @@ class Chunk:
             self.children_ids = []
         if self.metadata is None:
             self.metadata = {}
+    
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "content": self.content,
+            "level": self.level,
+            "parent_id": self.parent_id,
+            "children_ids": self.children_ids,
+            "metadata": self.metadata,
+        }
 
 
 class HierarchicalChunker:
